@@ -37,9 +37,9 @@ class NetworkTopo(Topo):
         self.addHost("h2", ip="10.0.1.3/24")
         self.addHost("ser", ip="10.0.2.2/24")
 
-        self.addSwitch("s1")
-        self.addSwitch("s2")
-        self.addSwitch("s3")
+        self.addSwitch("s1", dpid=f"{1:016d}")
+        self.addSwitch("s2", dpid=f"{2:016d}")
+        self.addSwitch("s3", dpid=f"{3:016d}")
 
         self.addLink("h1", "s1", bw=15, delay="10ms")
         self.addLink("h2", "s1", bw=15, delay="10ms")
