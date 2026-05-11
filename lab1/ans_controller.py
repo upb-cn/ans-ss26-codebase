@@ -48,9 +48,9 @@ class LearningSwitch(app_manager.RyuApp):
 
         # Router port (gateways) IP addresses assumed by the controller
         self.port_to_own_ip = {
-        1: "10.0.1.1/24",
-        2: "10.0.2.1/24",
-        3: "192.168.1.1/24"
+        1: "10.0.1.1",
+        2: "10.0.2.1",
+        3: "192.168.1.1"
         }
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
@@ -85,7 +85,7 @@ class LearningSwitch(app_manager.RyuApp):
         datapath = msg.datapath
 
         if datapath.id == 3:
-            # handle router request
+            # handle router (s3) request
             self.handle_router_request(ev)
             return
 
@@ -93,10 +93,15 @@ class LearningSwitch(app_manager.RyuApp):
 
         in_port = msg.match["in_port"]
         pkt = packet.Packet(msg.data)
+
+        logger.info("Switch Packets:")
+        for p in pkt.protocols:
+            logger.info(f"\t- {p}")
+
         eth = pkt.get_protocol(ethernet.ethernet)
         logger.info(f"seq={self.packets_received}: dpid={datapath.id}: in_port={in_port}, eth_src={eth.src}, eth_dst={eth.dst};")
 
-        self.add_flow(datapath=datapath, priority=0,
+        self.add_flow(datapath=datapath, priority=1,
                       match=ofproto_v1_3_parser.OFPMatch(eth_dst=eth.src),
                       actions=[ofproto_v1_3_parser.OFPActionOutput(port=in_port)])
         logger.info(f"Added rule: match(eth_dst={eth.src}), action(port={in_port}) on dpid={datapath.id};")
@@ -111,4 +116,24 @@ class LearningSwitch(app_manager.RyuApp):
     def handle_router_request(self, ev):
         msg = ev.msg
         datapath = msg.datapath
-        pass
+        in_port = msg.match["in_port"]
+        pkt = packet.Packet(msg.data)
+
+        logger.info(f"Packet comes from router and was received on port {in_port}! Protocols:")
+        for p in pkt.protocols:
+            logger.info(f"\t- {p}")
+        
+        # ping packets have ipv6 and icmpv6 -> Ping uses icmp
+        # iperf generates arp packages
+
+        # must answer ARP-Packets as hosts will ARP for IP Gateways
+        # "10.0.1.1"    ? => "00:00:00:00:01:01"
+        # "10.0.2.1"    ? => "00:00:00:00:01:02",
+        # "192.168.1.1" ? => "00:00:00:00:01:03"
+        
+        # router needs to rewrite ethernet headers when forwarding its packets (correkt?)
+        
+        # ext may not ping internal hosts => drop ICMP packets from ext
+            # what about from internal hosts to extern, according to the given result they should also not be able to ping ext
+        # no TCP/UDP allowed between ext and ser => drop TCP/UDP packets with respective src/dst-pairs
+        # hosts may only ping their own gateway => drop ICMP packages if src-ip != dst-ip

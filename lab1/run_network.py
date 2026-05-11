@@ -146,7 +146,7 @@ def run():
         ip="127.0.0.1", 
         port=6653)
     net.start()
-    net.pingAllFull()
+    #net.pingAllFull()
     #switch_flow_tester = SwitchFlowTester(net)
     #switch_flow_tester.test()
     CLI(net)
