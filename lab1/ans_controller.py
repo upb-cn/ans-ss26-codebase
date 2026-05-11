@@ -39,6 +39,20 @@ class LearningSwitch(app_manager.RyuApp):
         # Here you can initialize the data structures you want to keep at the controller
         self.packets_received = 0
 
+        # Router port MACs assumed by the controller
+        self.port_to_own_mac = {
+        1: "00:00:00:00:01:01",
+        2: "00:00:00:00:01:02",
+        3: "00:00:00:00:01:03"
+        }
+
+        # Router port (gateways) IP addresses assumed by the controller
+        self.port_to_own_ip = {
+        1: "10.0.1.1/24",
+        2: "10.0.2.1/24",
+        3: "192.168.1.1/24"
+        }
+
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         
@@ -69,6 +83,14 @@ class LearningSwitch(app_manager.RyuApp):
         self.packets_received += 1
         msg = ev.msg
         datapath = msg.datapath
+
+        if datapath.id == 3:
+            # handle router request
+            self.handle_router_request(ev)
+            return
+
+        # handle switch requests
+
         in_port = msg.match["in_port"]
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
@@ -85,3 +107,8 @@ class LearningSwitch(app_manager.RyuApp):
                                                data=msg.data)
         datapath.send_msg(out)
         logger.info(f"Instruction to dpid={datapath.id}: broadcast")
+
+    def handle_router_request(self, ev):
+        msg = ev.msg
+        datapath = msg.datapath
+        pass
