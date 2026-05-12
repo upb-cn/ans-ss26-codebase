@@ -28,9 +28,8 @@ from mininet.net import Mininet
 from mininet.node import OVSKernelSwitch, RemoteController, Switch
 from mininet.link import TCLink
 from mininet.topo import Topo
-from mininet.log import setLogLevel
+import mininet.log
 import requests
-from ryu.topology import switches
 
 
 class NetworkTopo(Topo):
@@ -85,7 +84,7 @@ class SwitchFlowTester:
 
         for switchname in self.test_data_switch_flows:
             for hostmac in self.test_data_switch_flows[switchname]:
-                print(f"Switch={switchname}: {hostmac} --> {self.test_data_switch_flows[switchname][hostmac]}")
+                mininet.log.info(f"Switch={switchname}: {hostmac} --> {self.test_data_switch_flows[switchname][hostmac]}")
 
     def get_port_to_hop(self, switchname):
         switch = self.net.get(switchname)
@@ -130,9 +129,9 @@ class SwitchFlowTester:
             for hostmac, port_no in self.test_data_switch_flows[switchname].items():
                 test = flows[switchname].get(hostmac) == port_no
                 if test:
-                    print(f"Success: Switch={switchname}: Rule: {hostmac} --> {port_no} == {flows[switchname].get(hostmac)}")
+                    mininet.log.info(f"Success: Switch={switchname}: Rule: {hostmac} --> {port_no} == {flows[switchname].get(hostmac)}")
                 else:
-                    print(f"Failure: Switch={switchname}: Rule: {hostmac} --> {port_no} != {flows[switchname].get(hostmac)}")
+                    mininet.log.info(f"Failure: Switch={switchname}: Rule: {hostmac} --> {port_no} != {flows[switchname].get(hostmac)}")
 
 
 def run():
@@ -153,12 +152,14 @@ def run():
         host.cmd("sysctl -w net.ipv6.conf.lo.disable_ipv6=1")
 
     net.start()
-    #net.pingAllFull()
-    #switch_flow_tester = SwitchFlowTester(net)
-    #switch_flow_tester.test()
+    net.pingAll()
+
+    switch_flow_tester = SwitchFlowTester(net)
+    switch_flow_tester.test()
+
     CLI(net)
     net.stop()
 
 if __name__ == '__main__':
-    setLogLevel('info')
+    mininet.log.setLogLevel('info')
     run()
