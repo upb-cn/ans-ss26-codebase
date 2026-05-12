@@ -1,7 +1,7 @@
 # Readme
 First thing in any window: `cd share/ans-ss26-labs/lab1`
 
-In first window: `ryu-manager ans_controller.py`
+In first window: `ryu-manager ans_controller.py` or `ryu-manager ryu.app.ofctl_rest ans_controller.py` to use the `SwitchFlowTester`
 
 In second window: `sudo python3 run_network.py`
 
