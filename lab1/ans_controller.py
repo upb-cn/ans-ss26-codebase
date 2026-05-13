@@ -24,7 +24,7 @@ from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
-from ryu.lib.packet import packet, ethernet, ether_types
+from ryu.lib.packet import packet, ethernet, ether_types, ipv4
 from ryu.ofproto import ofproto_v1_3, ofproto_v1_3_parser
 from pprint import pprint
 
@@ -148,6 +148,39 @@ class LearningSwitch(app_manager.RyuApp):
         datapath = msg.datapath
         in_port = msg.match["in_port"]
         pkt = packet.Packet(msg.data)
+
+        eth = pkt.get_protocol(ethernet.ethernet)
+        ip = pkt.get_protocol(ipv4.ipv4)
+        icmp = pkt.get_protocol(icmp.icmp)
+        arp = pkt.get_protocol(arp.arp)
+        tcp = pkt.get_protocol(tcp.tcp)
+        udp = pkt.get_protocol(udp.udp)
+
+        if udp or tcp:
+            # do udp/tcp stuff
+            # no connection between ser and ext, otherwise ok
+            pass
+
+        if icmp:
+            # do icmp stuff
+            # internal all allowed (concrete Ip-adresses)
+            # gateway pings only to own (subnet) gateway (wenn subnetzte unterschiedlich, dann droppen, sonst icmp reply nach source)
+            # none to external
+            # none from external
+            pass
+
+        if arp:
+            # do arp stuff
+            # answer to in-port with MAC of in-port-gateway (arp reply)
+            pass
+
+        if ip:
+            # do ip stuff
+            # prefix matching, next hop (Ethernet-Header Rewriting: MAC-adresse der Source muss MAC adresse des input-ports sein (siehe actions))
+            pass
+        
+        # do ethernet stuff?
+
 
         logger.info(f"Packet comes from router and was received on port {in_port}! Protocols:")
         for p in pkt.protocols:
