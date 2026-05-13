@@ -19,6 +19,7 @@
  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  """
 from collections import defaultdict
+from ipaddress import ip_network
 from logging import getLogger
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -54,8 +55,11 @@ class LearningSwitch(app_manager.RyuApp):
             2: "10.0.2.1",
             3: "192.168.1.1"
         }
-
+        self.netmask = 24
+        self.network_to_port = {ip_network((ip, self.netmask), strict=False).network_address: port for port, ip in self.port_to_own_ip.items()}
         self.mac_to_port = defaultdict(dict)
+        self.ip_to_mac = {}
+        self.buffered_ipv4_packets = defaultdict(list)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -143,6 +147,36 @@ class LearningSwitch(app_manager.RyuApp):
             logger.info(f"Instruction to dpid={datapath.id}: broadcast")
         print(num_minus * "-" + "_packet_in_handler end" + num_minus * "-")
 
+    def forward_ipv4_packet(self, ipv4_packet, eth_dst, eth_packet, datapath, parser, in_port, ofproto):
+        match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=(ipv4_packet.dst, 24))
+        dst_network = ip_network((ipv4_packet.dst, self.netmask), strict=False)
+        out_port = self.network_to_port[dst_network.network_address]
+        actions = [parser.OFPActionSetField(eth_src=self.port_to_own_mac[out_port]),
+                   parser.OFPActionSetField(eth_dst=eth_dst),
+                   parser.OFPActionOutput(out_port)]
+        self.add_flow(datapath=datapath, priority=2, match=match, actions=actions)
+        logger.info(f"Added rule: match={match}, action={actions} on router;")
+
+        eth_packet.src = self.network_to_port[dst_network.network_address]
+        eth_packet.dst = eth_dst
+        pkt = packet.Packet()
+        pkt.add_protocol(eth_packet)
+        pkt.add_protocol(ipv4_packet)
+        pkt.serialize()
+
+        logger.info(f"Instruction to router: forward to ip={ipv4_packet.dst}, mac={eth_dst}")
+        return self.packet_out_to_port(data=pkt.data, datapath=datapath, parser=parser, in_port=in_port, port=out_port, ofproto=ofproto)
+
+    def construct_arp_request(self, port, dst_ip, datapath, parser, ofproto):
+        eth_packet = ethernet.ethernet(src=self.port_to_own_mac[port], ethertype=ether_types.ETH_TYPE_ARP)
+        arp_packet = arp.arp(opcode=arp.ARP_REQUEST, src_mac=self.port_to_own_mac[port], src_ip=self.port_to_own_ip[port], dst_ip=dst_ip)
+        pkt = packet.Packet()
+        pkt.add_protocol(eth_packet)
+        pkt.add_protocol(arp_packet)
+        pkt.serialize()
+        logger.info(f"Instruction to router: arp request for {dst_ip}")
+        return self.packet_out_to_port(data=pkt.data, datapath=datapath, parser=parser, in_port=ofproto.OFPP_CONTROLLER, port=port, ofproto=ofproto)
+
     def handle_router_request(self, ev):
         num_minus = 10
         print(num_minus * "-" + "handle_router_request start" + num_minus * "-")
@@ -223,7 +257,22 @@ class LearningSwitch(app_manager.RyuApp):
         if ipv4_packet:
             # do ip stuff
             # prefix matching, next hop (Ethernet-Header Rewriting: MAC-adresse der Source muss MAC adresse des input-ports sein (siehe actions))
-            pass
+            if self.ip_to_mac.get(ipv4_packet.dst):
+                logger.info(f"For IP-Address={ipv4_packet.dst}, found dst_mac={self.ip_to_mac.get(ipv4_packet.dst)}")
+                outs.append(self.forward_ipv4_packet(ipv4_packet=ipv4_packet,
+                                                     eth_dst=self.ip_to_mac[ipv4_packet.dst],
+                                                     eth_packet=eth_packet,
+                                                     datapath=datapath,
+                                                     parser=parser,
+                                                     in_port=in_port,
+                                                     ofproto=ofproto))
+            else:
+                self.buffered_ipv4_packets[ipv4_packet.dst].append(ipv4_packet)
+                outs.append(self.construct_arp_request(port=self.network_to_port[ip_network((ipv4_packet.dst, self.netmask), strict=False).network_address],
+                                                       dst_ip=ipv4_packet.dst,
+                                                       datapath=datapath,
+                                                       parser=parser,
+                                                       ofproto=ofproto))
 
         [datapath.send_msg(out) for out in outs]
         # do ethernet stuff?
