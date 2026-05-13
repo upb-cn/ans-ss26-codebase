@@ -94,6 +94,9 @@ class LearningSwitch(app_manager.RyuApp):
                                    actions=[parser.OFPActionOutput(port)],
                                    data=msg.data)
 
+    def reply_packet_to_in_port(self, *, in_port, **kwargs):
+        return self.packet_out_to_port(port=in_port, **kwargs)
+
     def flood_packet_out(self, *, ofproto, **kwargs):
         return self.packet_out_to_port(port=ofproto.OFPP_FLOOD, **kwargs)
 
