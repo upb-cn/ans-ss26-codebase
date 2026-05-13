@@ -149,22 +149,29 @@ class LearningSwitch(app_manager.RyuApp):
 
         msg = ev.msg
         datapath = msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
         in_port = msg.match["in_port"]
         pkt = packet.Packet(msg.data)
 
-        eth = pkt.get_protocol(ethernet.ethernet)
-        ip = pkt.get_protocol(ipv4.ipv4)
-        icmp = pkt.get_protocol(icmp.icmp)
-        arp = pkt.get_protocol(arp.arp)
-        tcp = pkt.get_protocol(tcp.tcp)
-        udp = pkt.get_protocol(udp.udp)
+        logger.info(f"Packet comes from router and was received on port {in_port}! Protocols:")
+        for p in pkt.protocols:
+            logger.info(f"\t- {p}")
 
-        if udp or tcp:
+        eth_packet = pkt.get_protocol(ethernet.ethernet)
+        ipv4_packet = pkt.get_protocol(ipv4.ipv4)
+        icmp_packet = pkt.get_protocol(icmp.icmp)
+        arp_packet = pkt.get_protocol(arp.arp)
+        tcp_packet = pkt.get_protocol(tcp.tcp)
+        udp_packet = pkt.get_protocol(udp.udp)
+
+        if udp_packet or tcp_packet:
             # do udp/tcp stuff
             # no connection between ser and ext, otherwise ok
             pass
 
-        if icmp:
+        if icmp_packet:
             # do icmp stuff
             # internal all allowed (concrete Ip-adresses)
             # gateway pings only to own (subnet) gateway (wenn subnetzte unterschiedlich, dann droppen, sonst icmp reply nach source)
@@ -172,7 +179,7 @@ class LearningSwitch(app_manager.RyuApp):
             # none from external
             pass
 
-        if arp:
+        if arp_packet:
             # do arp stuff
             # answer to in-port with MAC of in-port-gateway (arp reply)
             pass
@@ -181,13 +188,9 @@ class LearningSwitch(app_manager.RyuApp):
             # do ip stuff
             # prefix matching, next hop (Ethernet-Header Rewriting: MAC-adresse der Source muss MAC adresse des input-ports sein (siehe actions))
             pass
-        
+
+        datapath.send_msg(out)
         # do ethernet stuff?
-
-
-        logger.info(f"Packet comes from router and was received on port {in_port}! Protocols:")
-        for p in pkt.protocols:
-            logger.info(f"\t- {p}")
 
         # ping packets have ipv6 and icmpv6 -> Ping uses icmp
         # iperf generates arp packages
