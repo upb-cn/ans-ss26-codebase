@@ -26,11 +26,18 @@ from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.lib.packet import packet, ethernet, ether_types, ipv4, icmp, arp, tcp, udp
+from ryu.lib.packet.in_proto import IPPROTO_ICMP
 from ryu.ofproto import ofproto_v1_3, ofproto_v1_3_parser
 from pprint import pprint
 
+from ryu.ofproto.ofproto_v1_3_parser import OFPActionSetField
 
 logger = getLogger(__name__)
+
+
+PRIO_FORWARD = 2
+PRIO_REPLY = 3
+PRIO_DROP = 4
 
 
 class LearningSwitch(app_manager.RyuApp):
@@ -55,11 +62,13 @@ class LearningSwitch(app_manager.RyuApp):
             2: "10.0.2.1",
             3: "192.168.1.1"
         }
-        self.netmask = 24
+        self.netmask = "255.255.255.0"
         self.network_to_port = {ip_network((ip, self.netmask), strict=False).network_address: port for port, ip in self.port_to_own_ip.items()}
         self.mac_to_port = defaultdict(dict)
         self.ip_to_mac = {}
         self.buffered_ipv4_packets = defaultdict(list)
+        self.same_network_arp_drop_rules = defaultdict(list)
+        self.same_network_ip_drop_rules = defaultdict(list)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -77,7 +86,7 @@ class LearningSwitch(app_manager.RyuApp):
         # drop IPv6 for now
         match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IPV6)
         actions = []
-        self.add_flow(datapath, 3, match, actions)
+        self.add_flow(datapath, PRIO_DROP, match, actions)
 
     # Add a flow entry to the flow-table
     def add_flow(self, datapath, priority, match, actions):
@@ -91,7 +100,7 @@ class LearningSwitch(app_manager.RyuApp):
         datapath.send_msg(mod)
 
     @staticmethod
-    def packet_out_to_port(data, datapath, parser, in_port, port, ofproto):
+    def packet_out_to_port(*, data, datapath, parser, in_port, port, ofproto):
         return parser.OFPPacketOut(datapath=datapath,
                                    in_port=in_port,
                                    buffer_id=ofproto.OFP_NO_BUFFER,
@@ -107,10 +116,8 @@ class LearningSwitch(app_manager.RyuApp):
     # Handle the packet_in event
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
-        num_minus = 10
+        num_minus = 20
         print(num_minus * "-" + "_packet_in_handler start" + num_minus * "-")
-        # print(f"self.mac_to_port={self.mac_to_port}")
-
         self.packet_counter += 1
         msg = ev.msg
         datapath = msg.datapath
@@ -120,7 +127,6 @@ class LearningSwitch(app_manager.RyuApp):
         if datapath.id == 3:
             # handle router (s3) request
             self.handle_router_request(ev)
-
         else:
             # handle switch requests
             in_port = msg.match["in_port"]
@@ -133,32 +139,35 @@ class LearningSwitch(app_manager.RyuApp):
             eth = pkt.get_protocol(ethernet.ethernet)
             logger.info(f"seq={self.packet_counter}: dpid={datapath.id}: in_port={in_port}, eth_src={eth.src}, eth_dst={eth.dst};")
 
-            if self.mac_to_port.get(datapath.id, {}).get(eth.dst):
-                logger.critical(f"Existing rule did not match: match(eth_dst={eth.src}), action(port={in_port}) on dpid={datapath.id};")
-                out = self.packet_out_to_port(msg.data, datapath, parser, in_port, port=self.mac_to_port[datapath.id][eth.dst], ofproto=ofproto)
-            else:
+            if eth.src not in self.mac_to_port[datapath.id]:
                 self.mac_to_port[datapath.id][eth.src] = in_port
-                self.add_flow(datapath=datapath, priority=2,
-                              match=parser.OFPMatch(eth_dst=eth.src),
-                              actions=[parser.OFPActionOutput(port=in_port)])
-                logger.info(f"Added rule: match(eth_dst={eth.src}), action(port={in_port}) on dpid={datapath.id};")
+                logger.info(f"New MAC for dpid={datapath.id}: {eth.src}")
+            if self.mac_to_port.get(datapath.id, {}).get(eth.dst):
+                match = parser.OFPMatch(eth_dst=eth.dst, in_port=in_port)
+                actions = [parser.OFPActionOutput(port=self.mac_to_port[datapath.id][eth.dst])]
+                self.add_flow(datapath=datapath, priority=PRIO_FORWARD, match=match, actions=actions)
+                logger.info(f"Added rule: match={match}, actions={actions} on dpid={datapath.id};")
+                out = self.packet_out_to_port(data=msg.data, datapath=datapath, parser=parser, in_port=in_port, port=self.mac_to_port[datapath.id][eth.dst], ofproto=ofproto)
+            else:
                 out = self.flood_packet_out(data=msg.data, datapath=datapath, parser=parser, in_port=in_port, ofproto=ofproto)
             datapath.send_msg(out)
             logger.info(f"Instruction to dpid={datapath.id}: broadcast")
         print(num_minus * "-" + "_packet_in_handler end" + num_minus * "-")
 
     def forward_ipv4_packet(self, ipv4_packet, eth_dst, eth_packet, datapath, parser, in_port, ofproto):
-        match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=(ipv4_packet.dst, 24))
+        match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=(ipv4_packet.dst, self.netmask))
         dst_network = ip_network((ipv4_packet.dst, self.netmask), strict=False)
         out_port = self.network_to_port[dst_network.network_address]
         actions = [parser.OFPActionSetField(eth_src=self.port_to_own_mac[out_port]),
                    parser.OFPActionSetField(eth_dst=eth_dst),
                    parser.OFPActionOutput(out_port)]
-        self.add_flow(datapath=datapath, priority=2, match=match, actions=actions)
-        logger.info(f"Added rule: match={match}, action={actions} on router;")
+        self.add_flow(datapath=datapath, priority=PRIO_FORWARD, match=match, actions=actions)
+        logger.info(f"Added rule: match={match}, actions={actions} on router;")
 
-        eth_packet.src = self.network_to_port[dst_network.network_address]
+        eth_packet.src = self.port_to_own_mac[out_port]
         eth_packet.dst = eth_dst
+        eth_packet.ethertype = ether_types.ETH_TYPE_IP
+        print(f"prepared fwd: {ipv4_packet}, eth_dst={eth_dst}, eth_packet.src={eth_packet.src}, eth_packet={eth_packet}, dpid={datapath.id}, in_port={in_port}")
         pkt = packet.Packet()
         pkt.add_protocol(eth_packet)
         pkt.add_protocol(ipv4_packet)
@@ -178,7 +187,7 @@ class LearningSwitch(app_manager.RyuApp):
         return self.packet_out_to_port(data=pkt.data, datapath=datapath, parser=parser, in_port=ofproto.OFPP_CONTROLLER, port=port, ofproto=ofproto)
 
     def handle_router_request(self, ev):
-        num_minus = 10
+        num_minus = 20
         print(num_minus * "-" + "handle_router_request start" + num_minus * "-")
 
         msg = ev.msg
@@ -217,32 +226,31 @@ class LearningSwitch(app_manager.RyuApp):
         if arp_packet:
             # do arp stuff
             # answer to in-port with MAC of in-port-gateway (arp reply)
-            if arp_packet.opcode == arp.ARP_REPLY:  # process arp reply
+            if arp_packet.dst_ip != self.port_to_own_ip[in_port]:
+                if arp_packet.dst_ip not in self.same_network_arp_drop_rules[in_port]:
+                    logger.info("Router: got foreign arp request. Dropping.")
+                    match = parser.OFPMatch(in_port=in_port, arp_tpa=arp_packet.dst_ip, eth_type=ether_types.ETH_TYPE_ARP)
+                    self.add_flow(datapath=datapath, priority=PRIO_DROP, match=match, actions=[])
+                    logger.info(f"Added rule: match={match}, actions={[]} on router;")
+                    self.same_network_arp_drop_rules[in_port].append(arp_packet.dst_ip)
+                else:
+                    logger.critical(f"Existing arp drop rule did not match: in_port={in_port} dst_ip={arp_packet.dst_ip}")
+            elif arp_packet.opcode == arp.ARP_REPLY:  # process arp reply
+                logger.info("Router: got ARP Reply")
                 self.ip_to_mac[arp_packet.src_ip] = arp_packet.src_mac
                 if self.buffered_ipv4_packets[arp_packet.src_ip]:
+                    logger.info("Router: found buffered IP packets, forwarding...")
                     buffered_packet = self.buffered_ipv4_packets[arp_packet.src_ip].pop(0)
                     outs.append(self.forward_ipv4_packet(ipv4_packet=buffered_packet,
-                                                         eth_dst=arp_packet.src_mac,#
+                                                         eth_dst=arp_packet.src_mac,
                                                          eth_packet=eth_packet,
                                                          datapath=datapath,
                                                          parser=parser,
                                                          in_port=ofproto.OFPP_CONTROLLER,
                                                          ofproto=ofproto))
             else:  # reply to arp request
-                match = parser.OFPMatch(in_port=in_port, arp_op=arp.ARP_REQUEST, eth_type=ether_types.ETH_TYPE_ARP)
-                actions = [parser.OFPActionSetField(arp_op=arp.ARP_REPLY),
-                           parser.OFPActionSetField(eth_src=self.port_to_own_mac[in_port]),
-                           parser.OFPActionSetField(eth_dst=arp_packet.src_mac),
-                           parser.OFPActionSetField(arp_sha=self.port_to_own_mac[in_port]),
-                           parser.OFPActionSetField(arp_tha=arp_packet.src_mac),
-                           parser.OFPActionSetField(arp_spa=self.port_to_own_ip[in_port]),
-                           parser.OFPActionSetField(arp_tpa=arp_packet.src_ip),
-                           parser.OFPActionOutput(port=in_port)]
-                # rule: send arp reply with gateway mac
-                self.add_flow(datapath=datapath, priority=2, match=match, actions=actions)
-                logger.info(f"Added rule: match={match}, action={actions} on router;")
-
-                # send arp reply manually the first time
+                logger.info("Router: Found ARP Request")
+                # send arp reply manually
                 eth_packet.src, eth_packet.dst = self.port_to_own_mac[in_port], eth_packet.src
                 arp_packet.src_mac, arp_packet.dst_mac = self.port_to_own_mac[in_port], arp_packet.src_mac
                 arp_packet.src_ip, arp_packet.dst_ip = self.port_to_own_ip[in_port], arp_packet.src_ip
@@ -257,7 +265,40 @@ class LearningSwitch(app_manager.RyuApp):
         if ipv4_packet:
             # do ip stuff
             # prefix matching, next hop (Ethernet-Header Rewriting: MAC-adresse der Source muss MAC adresse des input-ports sein (siehe actions))
-            if self.ip_to_mac.get(ipv4_packet.dst):
+            if ipv4_packet.dst in self.port_to_own_ip.values():
+                if ipv4_packet.proto == IPPROTO_ICMP:
+                    if ipv4_packet.dst != self.port_to_own_ip[in_port]:
+                        match = parser.OFPMatch(in_port=in_port, ipv4_dst=ipv4_packet.dst)
+                        actions = []
+                        self.add_flow(datapath=datapath, priority=PRIO_DROP, match=match, actions=actions)
+                        logger.info(f"Router: pinged wrong Gateway: src={ipv4_packet.src}; dst={ipv4_packet.dst};")
+                        logger.info(f"Added drop rule: match={match}; actions={actions};")
+                    else:
+                        logger.info(f"Router: ping Gateway: src={ipv4_packet.src}; dst={ipv4_packet.dst};")
+                        eth_packet.src, eth_packet.dst = self.port_to_own_mac[in_port], eth_packet.src
+                        ipv4_packet.src, ipv4_packet.dst = self.port_to_own_ip[in_port], ipv4_packet.src
+                        icmp_packet.type = icmp.ICMP_ECHO_REPLY
+                        pkt = packet.Packet()
+                        pkt.add_protocol(eth_packet)
+                        pkt.add_protocol(ipv4_packet)
+                        pkt.add_protocol(icmp_packet)
+                        pkt.serialize()
+                        outs.append(self.reply_packet_to_in_port(data=pkt.data, datapath=datapath, parser=parser, in_port=in_port, ofproto=ofproto))
+                        logger.info(f"Instruction to router: send icmp echo reply")
+                else:
+                    logger.critical(f"Router: unknown IP-Protocol: {ipv4_packet.proto}")
+
+            elif (ip_network((ipv4_packet.src, self.netmask), strict=False) == ip_network((ipv4_packet.dst, self.netmask), strict=False) and
+                    ipv4_packet.dst != self.port_to_own_ip[in_port]):
+                if ipv4_packet.dst not in self.same_network_ip_drop_rules[in_port]:
+                    logger.info("Router: got in network ip broadcast. Dropping.")
+                    match = parser.OFPMatch(in_port=in_port, ipv4_dst=ipv4_packet.dst, eth_type=ether_types.ETH_TYPE_IP)
+                    self.add_flow(datapath=datapath, priority=PRIO_DROP, match=match, actions=[])
+                    logger.info(f"Added rule: match={match}, actions={[]} on router;")
+                    self.same_network_ip_drop_rules[in_port].append(ipv4_packet.dst)
+                else:
+                    logger.critical(f"Existing IP drop rule did not match: in_port={in_port} dst_ip={ipv4_packet.dst}")
+            elif self.ip_to_mac.get(ipv4_packet.dst):
                 logger.info(f"For IP-Address={ipv4_packet.dst}, found dst_mac={self.ip_to_mac.get(ipv4_packet.dst)}")
                 outs.append(self.forward_ipv4_packet(ipv4_packet=ipv4_packet,
                                                      eth_dst=self.ip_to_mac[ipv4_packet.dst],
@@ -274,7 +315,8 @@ class LearningSwitch(app_manager.RyuApp):
                                                        parser=parser,
                                                        ofproto=ofproto))
 
-        [datapath.send_msg(out) for out in outs]
+        for out in outs:
+            logger.info(f"result={datapath.send_msg(out)}: {out}")
         # do ethernet stuff?
 
         # ping packets have ipv6 and icmpv6 -> Ping uses icmp
