@@ -19,26 +19,23 @@
  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  """
 from collections import defaultdict
-from ipaddress import ip_address, ip_network, IPv4Network
+from ipaddress import ip_address, ip_network
 from logging import getLogger
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.lib.packet import packet, ethernet, ether_types, ipv4, in_proto, icmp, arp
-from ryu.ofproto import ofproto_v1_3, ofproto_v1_3_parser
+from ryu.ofproto import ofproto_v1_3
 from pprint import pprint
 
-from ryu.ofproto.ofproto_v1_3_parser import OFPActionSetField
 
 logger = getLogger(__name__)
 PRIO_FIREWALL = 5
-PRIO_STANDARD = 2
-PRIO_CATCHALL = 0
-
-PRIO_FORWARD = 2
-PRIO_REPLY = 3
 PRIO_DROP = 4
+PRIO_REPLY = 3
+PRIO_FORWARD = 2
+PRIO_CATCHALL = 0
 
 
 class LearningSwitch(app_manager.RyuApp):
@@ -49,6 +46,11 @@ class LearningSwitch(app_manager.RyuApp):
 
         # Here you can initialize the data structures you want to keep at the controller
         self.packet_counter = 0
+        self.mac_to_port = defaultdict(dict)
+        self.ip_to_mac = {}
+        self.buffered_msgs = defaultdict(list)
+        self.same_network_arp_drop_rules = defaultdict(list)
+        self.same_network_ip_drop_rules = defaultdict(list)
 
         # Router port MACs assumed by the controller
         self.port_to_own_mac = {
@@ -63,13 +65,9 @@ class LearningSwitch(app_manager.RyuApp):
             2: "10.0.2.1",          # internal server gateway (ser)
             3: "192.168.1.1"        # external server gateway (ext)
         }
+
         self.netmask = "255.255.255.0"
         self.network_to_port = {ip_network((ip, self.netmask), strict=False).network_address: port for port, ip in self.port_to_own_ip.items()}
-        self.mac_to_port = defaultdict(dict)
-        self.ip_to_mac = {}
-        self.buffered_msgs = defaultdict(list)
-        self.same_network_arp_drop_rules = defaultdict(list)
-        self.same_network_ip_drop_rules = defaultdict(list)
 
         self.firewall = [
             {   # no ICMP from ext to any intern (only own gateway)
@@ -112,7 +110,6 @@ class LearningSwitch(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
-
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -127,6 +124,7 @@ class LearningSwitch(app_manager.RyuApp):
         match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IPV6)
         actions = []
         self.add_flow(datapath, PRIO_DROP, match, actions)
+
 
     # Add a flow entry to the flow-table
     def add_flow(self, datapath, priority, match, actions):
@@ -143,10 +141,6 @@ class LearningSwitch(app_manager.RyuApp):
     # Handle the packet_in event
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
-        #num_minus = 10
-        #print(num_minus * "-" + "_packet_in_handler start" + num_minus * "-")
-        # print(f"self.mac_to_port={self.mac_to_port}")
-
         self.packet_counter += 1
         msg = ev.msg
         datapath = msg.datapath
@@ -156,22 +150,18 @@ class LearningSwitch(app_manager.RyuApp):
         logger.info(f"\n###### NEW PACKET ######")
         pkt = packet.Packet(msg.data)
         for p in pkt.protocols:
-            logger.info(f"{type(p)}")
+            logger.info(f" - {p}")
 
         if datapath.id == 3:
             # handle router (s3) request
             self.handle_router_request(ev)
         else:
+            # handle switch requests
             num_minus = 10
             print(num_minus * "-" + "Switch Request start (_packet_in_handler)" + num_minus * "-")
-            # handle switch requests
+            
             in_port = msg.match["in_port"]
             pkt = packet.Packet(msg.data)
-
-            #logger.info("Switch Packets:")
-            #for p in pkt.protocols:
-            #    logger.info(f"\t- {p}")
-
             eth = pkt.get_protocol(ethernet.ethernet)
             logger.info(f"seq={self.packet_counter}: dpid={datapath.id}: in_port={in_port}, eth_src={eth.src}, eth_dst={eth.dst};")
 
@@ -187,7 +177,7 @@ class LearningSwitch(app_manager.RyuApp):
                 # controller knows port of non-broadcast destination MAC -> add flow rule matching on in_port and dst-MAC
                 match = parser.OFPMatch(eth_dst = eth.dst, in_port = in_port)
                 actions = [parser.OFPActionOutput(port=out_port)]
-                self.add_flow(datapath=datapath, priority=PRIO_STANDARD, match=match, actions=actions)
+                self.add_flow(datapath=datapath, priority=PRIO_FORWARD, match=match, actions=actions)
                 logger.info(f"Added rule on s{datapath.id}: match={match}, action={actions}")
                 
                 # send packet out to output port
@@ -199,7 +189,6 @@ class LearningSwitch(app_manager.RyuApp):
                 logger.info(f"Instruction to dpid={datapath.id}: broadcast")
 
             datapath.send_msg(out)
-            #print(num_minus * "-" + "Switch Request end (_packet_in_handler)" + num_minus * "-")
 
 
     @staticmethod
@@ -296,8 +285,7 @@ class LearningSwitch(app_manager.RyuApp):
 
         if arp_packet:
             logger.info(f"seq={self.packet_counter}: Got ARP packet:\n{arp_packet}")
-            # do arp stuff
-            # answer to in-port with MAC of in-port-gateway (arp reply)
+
             if arp_packet.dst_ip != self.port_to_own_ip[in_port]:
                 if arp_packet.dst_ip not in self.same_network_arp_drop_rules[in_port]:
                     logger.info("Router: got foreign arp request. Dropping.")
@@ -325,18 +313,22 @@ class LearningSwitch(app_manager.RyuApp):
                 pkt.add_protocol(eth_packet)
                 pkt.add_protocol(arp_packet)
                 pkt.serialize()
+                
+                for p in pkt.protocols:
+                    logger.info(f"> {p}")
+                
                 outs.append(self.reply_packet_to_in_port(data=pkt.data, datapath=datapath, parser=parser, in_port=in_port, ofproto=ofproto))
                 logger.info(f"Instruction to router: send arp reply")
 
         if ipv4_packet:
             logger.info(f"seq={self.packet_counter}: Got IPv4 packet")
-            # do ip stuff
-            # prefix matching, next hop (Ethernet-Header Rewriting: MAC-adresse der Source muss MAC adresse des input-ports sein (siehe actions))
             firewall_entry = self.check_for_firewall_entry(ipv4_packet)
 
             if firewall_entry:
                 # There is an entry in the firewall-table fitting this packet => add dropping rule
                 match = parser.OFPMatch(eth_type=0x0800, **firewall_entry)
+                # TODO: Instead of installing a dropping rule, the controller should probably send out an ICMP package with code 3 and type 13
+                # to get "Destination Unreachable — Communication Administratively Prohibited"
                 self.add_flow(datapath=datapath, 
                               priority=PRIO_FIREWALL, 
                               match=match, 
@@ -383,4 +375,4 @@ class LearningSwitch(app_manager.RyuApp):
                                                         ofproto=ofproto))
 
         for out in outs:
-            logger.info(f"result={datapath.send_msg(out)}: {out}")
+            logger.info(f"result={datapath.send_msg(out)}")#: {out}")
