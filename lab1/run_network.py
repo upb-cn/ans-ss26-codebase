@@ -37,10 +37,10 @@ class NetworkTopo(Topo):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.addHost("ext", ip="192.168.1.123/24")
-        self.addHost("h1" , ip="10.0.1.2/24")
-        self.addHost("h2" , ip="10.0.1.3/24")
-        self.addHost("ser", ip="10.0.2.2/24")
+        self.addHost("ext", ip="192.168.1.123/24", defaultRoute="via 192.168.1.1")
+        self.addHost("h1" , ip="10.0.1.2/24", defaultRoute="via 10.0.1.1")
+        self.addHost("h2" , ip="10.0.1.3/24", defaultRoute="via 10.0.1.1")
+        self.addHost("ser", ip="10.0.2.2/24", defaultRoute="via 10.0.2.1")
 
         self.addSwitch("s1", dpid=f"{1:016d}")
         self.addSwitch("s2", dpid=f"{2:016d}")
@@ -49,9 +49,9 @@ class NetworkTopo(Topo):
         # Assign mac address on links for s3 as per given topology
         self.addLink("h1", "s1" , bw=15, delay="10ms")
         self.addLink("h2", "s1" , bw=15, delay="10ms")
-        self.addLink("s1", "s3" , bw=15, delay="10ms", addr2='00:00:00:00:01:01')
-        self.addLink("s3", "ext", bw=15, delay="10ms", addr1='00:00:00:00:01:03')
+        self.addLink("s3", "s1" , bw=15, delay="10ms", addr1='00:00:00:00:01:01')
         self.addLink("s3", "s2" , bw=15, delay="10ms", addr1='00:00:00:00:01:02')
+        self.addLink("s3", "ext", bw=15, delay="10ms", addr1='00:00:00:00:01:03')
         self.addLink("s2", "ser", bw=15, delay="10ms")
 
 

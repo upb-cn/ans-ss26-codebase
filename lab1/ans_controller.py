@@ -159,13 +159,17 @@ class LearningSwitch(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
+        logger.info(f"\n###### NEW PACKET ######")
+        pkt = packet.Packet(msg.data)
+        for p in pkt.protocols:
+            logger.info(f"{type(p)}")
+
         if datapath.id == 3:
             # handle router (s3) request
             self.handle_router_request(ev)
-
         else:
             num_minus = 10
-            print("\n" + num_minus * "-" + "Switch Request start (_packet_in_handler)" + num_minus * "-")
+            print(num_minus * "-" + "Switch Request start (_packet_in_handler)" + num_minus * "-")
             # handle switch requests
             in_port = msg.match["in_port"]
             pkt = packet.Packet(msg.data)
@@ -177,18 +181,30 @@ class LearningSwitch(app_manager.RyuApp):
             eth = pkt.get_protocol(ethernet.ethernet)
             logger.info(f"seq={self.packet_counter}: dpid={datapath.id}: in_port={in_port}, eth_src={eth.src}, eth_dst={eth.dst};")
 
-            if self.mac_to_port.get(datapath.id, {}).get(eth.dst):
-                logger.critical(f"Existing rule did not match: match(eth_dst={eth.src}), action(port={in_port}) on dpid={datapath.id};")
-                out = self.packet_out_to_port(msg.data, datapath, parser, in_port, port=self.mac_to_port[datapath.id][eth.dst], ofproto=ofproto)
-            else:
+            if not self.mac_to_port.get(datapath.id, {}).get(eth.src):
+                # learn mapping between input-port and its MAC address (eth.src)
                 self.mac_to_port[datapath.id][eth.src] = in_port
-                self.add_flow(datapath=datapath, priority=PRIO_STANDARD,
-                              match=parser.OFPMatch(eth_dst=eth.src),
-                              actions=[parser.OFPActionOutput(port=in_port)])
-                logger.info(f"Added rule: match(eth_dst={eth.src}), action(port={in_port}) on dpid={datapath.id};")
+                logger.info(f"Updated mac_to_port for s{datapath.id}, {self.mac_to_port[datapath.id]}")
+            else: 
+                logger.info("Already know in_port <-> MAC-address mapping")
+
+            out_port = self.mac_to_port.get(datapath.id, {}).get(eth.dst)
+            if out_port:
+                # controller knows port of non-broadcast destination MAC -> add flow rule matching on in_port and dst-MAC
+                match = parser.OFPMatch(eth_dst = eth.dst, in_port = in_port)
+                actions = [parser.OFPActionOutput(port=out_port)]
+                self.add_flow(datapath=datapath, priority=PRIO_STANDARD, match=match, actions=actions)
+                logger.info(f"Added rule on s{datapath.id}: match={match}, action={actions}")
+                
+                # send packet out to output port
+                out = self.packet_out_to_port(data=msg.data, datapath=datapath, parser=parser, in_port=in_port, port=out_port, ofproto=ofproto)
+                logger.info(f"Instruction to dpid={datapath.id}: Send out to port {out_port}")
+            else:
+                # Flood packet out
                 out = self.flood_packet_out(data=msg.data, datapath=datapath, parser=parser, in_port=in_port, ofproto=ofproto)
+                logger.info(f"Instruction to dpid={datapath.id}: broadcast")
+
             datapath.send_msg(out)
-            logger.info(f"Instruction to dpid={datapath.id}: broadcast")
             #print(num_minus * "-" + "Switch Request end (_packet_in_handler)" + num_minus * "-")
 
 
@@ -210,7 +226,7 @@ class LearningSwitch(app_manager.RyuApp):
 
 
     def forward_ipv4_packet(self, ipv4_packet, eth_dst, eth_packet, datapath, parser, in_port, ofproto):
-        match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=(ipv4_packet.dst, 24))
+        match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst = ipv4_packet.dst + "/24")
         dst_network = ip_network((ipv4_packet.dst, self.netmask), strict=False)
         out_port = self.network_to_port[dst_network.network_address]
         actions = [parser.OFPActionSetField(eth_src=self.port_to_own_mac[out_port]),
@@ -219,7 +235,7 @@ class LearningSwitch(app_manager.RyuApp):
         self.add_flow(datapath=datapath, priority=PRIO_STANDARD, match=match, actions=actions)
         logger.info(f"Added rule: match={match}, action={actions} on router;")
 
-        eth_packet.src = self.network_to_port[dst_network.network_address]
+        eth_packet.src = self.port_to_own_mac[out_port]
         eth_packet.dst = eth_dst
         pkt = packet.Packet()
         pkt.add_protocol(eth_packet)
@@ -243,18 +259,20 @@ class LearningSwitch(app_manager.RyuApp):
 
     def check_for_firewall_entry(self, ipv4_packet):
         logger.info(f"Checking IPv4 packet against firewall:\n{ipv4_packet}")
+        
         for entry in self.firewall:
             if all(getattr(ipv4_packet, key) == value if isinstance(value, int) else ip_address(getattr(ipv4_packet, key)) 
                    in value for key, value in entry.items()): 
                 logger.info(f"Found firewall entry: {entry}") 
-                return {"ip_proto": entry["proto"], "ipv4_src": ipv4_packet.src, "ipv4_dst": ipv4_packet.dst} 
-            logger.info(f"No matching firewall entry found")
-            return None 
+                return {"ip_proto": entry["proto"], "ipv4_src": ipv4_packet.src + "/24", "ipv4_dst": ipv4_packet.dst + "/24"} 
+        
+        logger.info(f"No matching firewall entry found")
+        return None 
 
 
     def handle_router_request(self, ev):
         num_minus = 10
-        print("\n" + num_minus * "-" + "Router Request start (handle_router_request)" + num_minus * "-")
+        print(num_minus * "-" + "Router Request start (handle_router_request)" + num_minus * "-")
 
         msg = ev.msg
         datapath = msg.datapath
@@ -290,7 +308,7 @@ class LearningSwitch(app_manager.RyuApp):
         #     pass
 
         if arp_packet:
-            logger.info("Got ARP packet")
+            logger.info(f"seq={self.packet_counter}: Got ARP packet:\n{arp_packet}")
             # do arp stuff
             # answer to in-port with MAC of in-port-gateway (arp reply)
             if arp_packet.opcode == arp.ARP_REPLY:  # process arp reply
@@ -333,7 +351,7 @@ class LearningSwitch(app_manager.RyuApp):
                 logger.info(f"Instruction to router: send arp reply")
 
         if ipv4_packet:
-            logger.info("Got IPv4 packet")
+            logger.info(f"seq={self.packet_counter}: Got IPv4 packet")
             # do ip stuff
             # prefix matching, next hop (Ethernet-Header Rewriting: MAC-adresse der Source muss MAC adresse des input-ports sein (siehe actions))
             firewall_entry = self.check_for_firewall_entry(ipv4_packet)
