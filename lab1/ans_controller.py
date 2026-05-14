@@ -24,6 +24,9 @@ from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
+from ryu.lib.packet import packet
+from ryu.lib.packet import ethernet
+from ryu.lib.packet import ether_types
 
 
 class LearningSwitch(app_manager.RyuApp):
@@ -33,6 +36,7 @@ class LearningSwitch(app_manager.RyuApp):
         super(LearningSwitch, self).__init__(*args, **kwargs)
 
         # Here you can initialize the data structures you want to keep at the controller
+        self.mac_to_port = {}
         
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
@@ -62,8 +66,66 @@ class LearningSwitch(app_manager.RyuApp):
     # Handle the packet_in event
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
-        
+
         msg = ev.msg
         datapath = msg.datapath
 
-        # Your controller implementation should start here
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        dpid = datapath.id
+        self.mac_to_port.setdefault(dpid, {})
+
+        in_port = msg.match['in_port']
+
+        pkt = packet.Packet(msg.data)
+        eth = pkt.get_protocol(ethernet.ethernet)
+
+        # Ignore LLDP packets
+        if eth.ethertype == ether_types.ETH_TYPE_LLDP:
+            return
+
+        dst = eth.dst
+        src = eth.src
+
+        # Learn MAC address
+        self.mac_to_port[dpid][src] = in_port
+
+        self.logger.info(
+            "switch=%s src=%s dst=%s in_port=%s",
+            dpid, src, dst, in_port
+        )
+
+        # Check if destination MAC is known
+        if dst in self.mac_to_port[dpid]:
+            out_port = self.mac_to_port[dpid][dst]
+        else:
+            out_port = ofproto.OFPP_FLOOD
+
+        actions = [parser.OFPActionOutput(out_port)]
+
+        # Install flow rule if destination known
+        if out_port != ofproto.OFPP_FLOOD:
+
+            match = parser.OFPMatch(
+                in_port=in_port,
+                eth_dst=dst
+            )
+
+            self.add_flow(
+                datapath,
+                1,
+                match,
+                actions
+            )
+
+        # Send packet out
+        out = parser.OFPPacketOut(
+            datapath=datapath,
+            buffer_id=ofproto.OFP_NO_BUFFER,
+            in_port=in_port,
+            actions=actions,
+            data=msg.data
+        )
+
+        datapath.send_msg(out)
