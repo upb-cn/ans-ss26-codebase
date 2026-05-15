@@ -21,7 +21,7 @@
 import datetime
 from collections import defaultdict
 from copy import deepcopy
-from ipaddress import ip_address, ip_network
+from ipaddress import ip_address, ip_network, IPv4Network, IPv4Address
 from logging import getLogger, StreamHandler, Formatter
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -32,16 +32,17 @@ from ryu.ofproto import ofproto_v1_3
 from pprint import pprint, pformat
 
 
-loglevel = "DEBUG"
-logger, switch_logger = getLogger(f"{__name__}_Router"), getLogger(f"{__name__}_Switch")
-logger.propagate, switch_logger.propagate = False, False
-logger.setLevel(loglevel), switch_logger.setLevel("INFO")
-logger.handlers.clear(), switch_logger.handlers.clear()
-handler = StreamHandler()
-switch_log_handler = StreamHandler()
-handler.setFormatter(Formatter(fmt="%(asctime)s, %(name)s, %(levelname)s, %(lineno)d: %(message)s"))
-switch_log_handler.setFormatter(Formatter(fmt="%(asctime)s, %(name)s, %(levelname)s, %(lineno)d: %(message)s"))
-logger.addHandler(handler), switch_logger.addHandler(switch_log_handler)
+logger, switch_logger = getLogger(__name__), getLogger(__name__)
+# loglevel = "DEBUG"
+# logger, switch_logger = getLogger(f"{__name__}_Router"), getLogger(f"{__name__}_Switch")
+# logger.propagate, switch_logger.propagate = False, False
+# logger.setLevel(loglevel), switch_logger.setLevel("INFO")
+# logger.handlers.clear(), switch_logger.handlers.clear()
+# handler = StreamHandler()
+# switch_log_handler = StreamHandler()
+# handler.setFormatter(Formatter(fmt="%(asctime)s, %(name)s, %(levelname)s, %(lineno)d: %(message)s"))
+# switch_log_handler.setFormatter(Formatter(fmt="%(asctime)s, %(name)s, %(levelname)s, %(lineno)d: %(message)s"))
+# logger.addHandler(handler), switch_logger.addHandler(switch_log_handler)
 
 
 PRIO_FIREWALL = 5
@@ -83,16 +84,32 @@ class LearningSwitch(app_manager.RyuApp):
         self.network_to_port = {ip_network((ip, self.netmask), strict=False).network_address: port for port, ip in self.port_to_own_ip.items()}
 
         self.firewall = [
-            {   # no ICMP from ext to any intern (only own gateway)
+            {   # no ICMP pings from ext to any intern (only own gateway)
                 "proto": in_proto.IPPROTO_ICMP,
+                "type": [icmp.ICMP_ECHO_REQUEST, icmp.ICMP_ECHO_REPLY],
                 "src": ip_network("192.168.1.0/24"),
                 "dst": ip_network("10.0.0.0/16")
             },
             {
-                # no ICMP from intern to extern
+                # no ICMP pings from intern to extern
                 "proto": in_proto.IPPROTO_ICMP,
+                "type": [icmp.ICMP_ECHO_REQUEST, icmp.ICMP_ECHO_REPLY],
                 "src": ip_network("10.0.0.0/16"),
                 "dst": ip_network("192.168.1.0/24")
+            },
+            {
+                # no ICMP pings from s1 subnet gateway to s2
+                "proto": in_proto.IPPROTO_ICMP,
+                "type": [icmp.ICMP_ECHO_REQUEST, icmp.ICMP_ECHO_REPLY],
+                "src": ip_network("10.0.1.0/24"),
+                "dst": ip_address("10.0.2.1")
+            },
+            {
+                # no ICMP pings from s2 subnet gateway to s1
+                "proto": in_proto.IPPROTO_ICMP,
+                "type": [icmp.ICMP_ECHO_REQUEST, icmp.ICMP_ECHO_REPLY],
+                "src": ip_network("10.0.2.0/24"),
+                "dst": ip_address("10.0.1.1")
             },
             {
                 # no TCP from ser to ext
@@ -242,7 +259,7 @@ class LearningSwitch(app_manager.RyuApp):
         ipv4_packet = pkt.get_protocol(ipv4.ipv4)
         ipv4_packet.ttl = ipv4_packet.ttl - 1;
 
-        match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=ipv4_packet.dst)
+        match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ip_proto = ipv4_packet.proto, ipv4_src=ipv4_packet.src, ipv4_dst=ipv4_packet.dst)
         dst_network = ip_network((ipv4_packet.dst, self.netmask), strict=False)
         out_port = self.network_to_port[dst_network.network_address]
         actions = [parser.OFPActionSetField(eth_src=self.port_to_own_mac[out_port]),
@@ -278,17 +295,42 @@ class LearningSwitch(app_manager.RyuApp):
         return self.packet_out_to_port(data=pkt.data, datapath=datapath, parser=parser, in_port=ofproto.OFPP_CONTROLLER, port=port, ofproto=ofproto)
 
 
-    def check_for_firewall_entry(self, ipv4_packet):
-        logger.info(f"Checking IPv4 packet against firewall:\n{ipv4_packet}")
+    def check_for_firewall_entry(self, ipv4_packet, icmp_packet = None):
+        logger.info(f"Checking IPv4 packet against firewall:\n{ipv4_packet}\n{icmp_packet}")
         
-        for entry in self.firewall:
-            if all(getattr(ipv4_packet, key) == value if isinstance(value, int) else ip_address(getattr(ipv4_packet, key)) 
-                   in value for key, value in entry.items()): 
-                logger.info(f"Found firewall entry: {entry}") 
-                return {"ip_proto": entry["proto"], "ipv4_src": ipv4_packet.src + "/24", "ipv4_dst": ipv4_packet.dst + "/24"} 
+        if icmp_packet:
+            for entry in self.firewall:                
+                match = [] 
+                for key, value in entry.items():
+
+                    # protocol
+                    if isinstance(value, int):
+                        match.append(getattr(ipv4_packet, key) == value)
+
+                    # type
+                    if key == "type":
+                        match.append(icmp_packet.type in value)
+                    
+                    # dst
+                    if isinstance(value, IPv4Address):
+                        match.append(ip_address(getattr(ipv4_packet, key)) == value)
+
+                    # src / dst
+                    if isinstance(value, IPv4Network):
+                        match.append(ip_address(getattr(ipv4_packet, key)) in value)
+ 
+                if all(match):
+                    logger.info(f"Found firewall entry: {entry}") 
+                    return {"ip_proto": entry["proto"], "icmpv4_type": icmp_packet.type, "ipv4_src": str(entry["src"]), "ipv4_dst": str(entry["dst"])}
+        else:
+            for entry in self.firewall:
+                if all(getattr(ipv4_packet, key) == value if isinstance(value, int) else ip_address(getattr(ipv4_packet, key)) 
+                    in value for key, value in entry.items()): 
+                    logger.info(f"Found firewall entry: {entry}") 
+                    return {"ip_proto": entry["proto"], "ipv4_src": str(entry["src"]), "ipv4_dst": str(entry["dst"])} 
         
         logger.info(f"No matching firewall entry found")
-        return None 
+        return None
 
 
     def handle_router_request(self, ev):
@@ -305,6 +347,7 @@ class LearningSwitch(app_manager.RyuApp):
 
         eth_packet = pkt.get_protocol(ethernet.ethernet)
         ipv4_packet = pkt.get_protocol(ipv4.ipv4)
+        icmp_packet = pkt.get_protocol(icmp.icmp)
         arp_packet = pkt.get_protocol(arp.arp)
 
         outs = []
@@ -356,13 +399,11 @@ class LearningSwitch(app_manager.RyuApp):
             logger.info(f"seq={self.packet_counter}: Got IPv4 packet")
             logger.debug(f"ipv4_packet: {ipv4_packet.src} -> {ipv4_packet.dst}; eth_packet: {eth_packet.src} -> {eth_packet.dst};")
 
-            firewall_entry = self.check_for_firewall_entry(ipv4_packet)
+            firewall_entry = self.check_for_firewall_entry(ipv4_packet, icmp_packet=icmp_packet)
 
             if firewall_entry:
-                # There is an entry in the firewall-table fitting this packet => add dropping rule
+                # There is an entry in the firewall-table fitting this packet
                 match = parser.OFPMatch(eth_type=0x0800, **firewall_entry)
-                # TODO: Instead of installing a dropping rule, the controller should probably send out an ICMP package with code 3 and type 13
-                # to get "Destination Unreachable — Communication Administratively Prohibited"
                 self.add_flow(datapath=datapath, 
                               priority=PRIO_FIREWALL, 
                               match=match, 
@@ -376,7 +417,6 @@ class LearningSwitch(app_manager.RyuApp):
                 # IP forwarding
                 if ipv4_packet.dst in self.port_to_own_ip.values():
                     if ipv4_packet.proto == in_proto.IPPROTO_ICMP:
-                        icmp_packet = pkt.get_protocol(icmp.icmp)
                         logger.info(f"ping Gateway: src={ipv4_packet.src}; dst={ipv4_packet.dst};")
                         eth_packet.src, eth_packet.dst = self.port_to_own_mac[in_port], eth_packet.src
                         ipv4_packet.src, ipv4_packet.dst = self.port_to_own_ip[in_port], ipv4_packet.src
