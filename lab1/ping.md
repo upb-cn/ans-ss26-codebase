@@ -36,7 +36,7 @@ h1 sends ICMP echo to the port towards s1 with ETH dst of the s3 and IP dst of s
 controller receives packet at s1, detects it already has the mac from s3 (the ETH dst MAC) from Step 4, and creates a flow rule telling it to output to the port towards h1 if matching that MAC, forwards it to port at h1.
 
 ## Step 7
-controller receives packet at s3, as ETH dst MAC matches router's port MAC, it should process it. router sees the IP dst matches a gateway on one of its ports, meaning the target is reachable in that subnet: Need to create a new packet with the IP src of h1 and IP dst of ser, ETC src of outgoing port, but the ETH dst is unknown.
+controller receives packet at s3, as ETH dst MAC matches router's port MAC, it should process it. router sees the IP dst matches a gateway on one of its ports, meaning the target is reachable in that subnet: Need to create a new packet with the IP src of h1 and IP dst of ser, ETH src of outgoing port, but the ETH dst is unknown.
 
 **Issue**: _In this step it also needs to store the incoming ip + mac combo and add it to the router's flow rule, otherwise it will do an ARP again when the echo reply travels back to h1_. It does so in Step 11 for the other side but not here
 
@@ -63,6 +63,6 @@ ser now received the ICMP echo from h1
 
 ## Similar steps now in the other direction, except no ARPing, so not listed here
 
-That the route was already traversed once in both directions during ARP, so most packets will not enter the controller anymore. If they do, it's an issue that needs to be looked at.
+The route was already traversed once in both directions during ARP, so most packets will not enter the controller anymore. If they do, it's an issue that needs to be looked at.
 
 **Issue:** _when the ser -> h1 echo reaches s3, it still does another ARP which it shouldn't, see Step 7_
