@@ -18,6 +18,7 @@
  IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  """
+import datetime
 from collections import defaultdict
 from ipaddress import ip_address, ip_network
 from logging import getLogger
@@ -147,7 +148,9 @@ class LearningSwitch(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        logger.info(f"\n###### NEW PACKET ######")
+        t = datetime.datetime.now()
+        timestamp = f"{t.minute}:{t.second}.{str(t.microsecond)[:3]}"
+        logger.info(f"\n{timestamp}   ###### NEW PACKET ######")
         pkt = packet.Packet(msg.data)
         for p in pkt.protocols:
             logger.info(f" - {p}")
