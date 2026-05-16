@@ -332,7 +332,7 @@ class LearningSwitch(app_manager.RyuApp):
         return None
     
 
-    def send_destination_unreachable(self, pkt, eth_packet, ipv4_packet, datapath, parser, in_port, ofproto):
+    def send_destination_unreachable(self, pkt, eth_packet, ipv4_packet, datapath, parser, in_port, ofproto, type_=icmp.ICMP_DEST_UNREACH, code=13):
         router_mac = self.port_to_own_mac[in_port]
         router_ip = self.port_to_own_ip[in_port]
 
@@ -344,12 +344,11 @@ class LearningSwitch(app_manager.RyuApp):
         orig_data = pkt.data[eth_offset:eth_offset + ipv4_packet.header_length * 4 + 8]
         # helper for icmp payload
         icmp_data = icmp.dest_unreach(data_len=len(orig_data), data=orig_data)
-        code = 13 # Prohibited
 
         un_pkt = packet.Packet()
         un_pkt.add_protocol(ethernet.ethernet(src=router_mac, dst=eth_packet.src, ethertype=ether.ETH_TYPE_IP))
         un_pkt.add_protocol(ipv4.ipv4(src=router_ip, dst=ipv4_packet.src, proto=in_proto.IPPROTO_ICMP))
-        un_pkt.add_protocol(icmp.icmp(type_=icmp.ICMP_DEST_UNREACH, code=code, csum=0, data=icmp_data))
+        un_pkt.add_protocol(icmp.icmp(type_=type_, code=code, csum=0, data=icmp_data))
         un_pkt.serialize()
         logger.info(f"\n\nSEND ICMP UNREACHABLE:\n {str(un_pkt)}")
         logger.info(f"\nin_port: {in_port}") # Easier to notice, before it was 2, then 1 after pingall
@@ -487,16 +486,23 @@ class LearningSwitch(app_manager.RyuApp):
                     logger.info(f"For IP-Address={ipv4_packet.dst}, found dst_mac={self.ip_to_mac.get(ipv4_packet.dst)}")
                     outs.append(self.forward_ipv4_packet(datapath=datapath, data=msg.data, in_port=in_port, eth_dst=self.ip_to_mac[ipv4_packet.dst]))
                 else:
-                    buffered = {"datapath": datapath, "data": deepcopy(msg.data), "in_port": in_port}
-                    self.buffered_msgs[ipv4_packet.dst].append(buffered)
-                    logger.info(f"MAC for IP={ipv4_packet.dst} not found. Buffer msg...")
-                    logger.debug(f"put in buffer: {pformat(buffered)}")
-                    # TODO if pinging+ARPing an IP that is unknown (i.e. 10.1.2.3), the dict lookup errors
-                    outs.append(self.construct_arp_request(port=self.network_to_port[ip_network((ipv4_packet.dst, self.netmask), strict=False).network_address],
-                                                        dst_ip=ipv4_packet.dst,
-                                                        datapath=datapath,
-                                                        parser=parser,
-                                                        ofproto=ofproto))
+                    target_network = ip_network((ipv4_packet.dst, self.netmask), strict=False).network_address
+                    port = self.network_to_port.get(target_network)
+                    if port:
+                        buffered = {"datapath": datapath, "data": deepcopy(msg.data), "in_port": in_port}
+                        self.buffered_msgs[ipv4_packet.dst].append(buffered)
+                        logger.info(f"MAC for IP={ipv4_packet.dst} not found. Buffer msg...")
+                        logger.debug(f"put in buffer: {pformat(buffered)}")
+                        outs.append(self.construct_arp_request(port=port,
+                                                               dst_ip=ipv4_packet.dst,
+                                                               datapath=datapath,
+                                                               parser=parser,
+                                                               ofproto=ofproto))
+                    else:
+                        logger.error(f"Target network unknown: {ipv4_packet.dst} from network {target_network}")
+                        self.send_destination_unreachable(pkt=pkt, eth_packet=eth_packet, ipv4_packet=ipv4_packet,
+                                                          datapath=datapath, parser=parser, in_port=in_port,
+                                                          ofproto=ofproto, code=0)
 
         for out in outs:
-            logger.debug(f"result={datapath.send_msg(out)}")#: {out}")
+            logger.debug(f"result={datapath.send_msg(out)}")
