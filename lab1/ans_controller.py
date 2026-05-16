@@ -32,7 +32,7 @@ from pprint import pprint, pformat
 
 
 logger, switch_logger = getLogger(__name__), getLogger(__name__)
-loglevel = "DEBUG"
+loglevel = "INFO"
 logger, switch_logger = getLogger(f"{__name__}_Router"), getLogger(f"{__name__}_Switch")
 logger.propagate, switch_logger.propagate = False, False
 logger.setLevel(loglevel), switch_logger.setLevel("INFO")
@@ -350,11 +350,7 @@ class LearningSwitch(app_manager.RyuApp):
         un_pkt.add_protocol(ipv4.ipv4(src=router_ip, dst=ipv4_packet.src, proto=in_proto.IPPROTO_ICMP))
         un_pkt.add_protocol(icmp.icmp(type_=type_, code=code, csum=0, data=icmp_data))
         un_pkt.serialize()
-        logger.info(f"\n\nSEND ICMP UNREACHABLE:\n {str(un_pkt)}")
-        logger.info(f"\nin_port: {in_port}") # Easier to notice, before it was 2, then 1 after pingall
-        # outdated with the controller redirect actions taking priority: TODO after pingall (router populated with flow rules), "ext ping h1 -c1" no longer instantly breaks, however,
-        # "h1 ping ext -c1" works (hosts swapped). The reason is that since the ping goes back and forth, it gets blocked on the h1 side, meaning the ext one hangs
-        # so this means the rules for ext in the router let it through somehow after pingall, even if it should go through the firewall check here
+        logger.info(f"SEND ICMP UNREACHABLE: {str(un_pkt)}, in_port: {in_port}")
         return self.reply_packet_to_in_port(data=un_pkt.data, datapath=datapath, parser=parser, in_port=in_port, ofproto=ofproto)
 
 
@@ -427,7 +423,17 @@ class LearningSwitch(app_manager.RyuApp):
             firewall_entry = self.check_for_firewall_entry(ipv4_packet, icmp_packet=icmp_packet)
 
             if firewall_entry:
-                if firewall_entry not in self.firewall_tracked:
+                # There is an entry in the firewall-table fitting this packet
+                match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, **firewall_entry)
+                self.add_flow(datapath=datapath,
+                              priority=PRIO_FIREWALL,
+                              match=match,
+                              actions=[])
+                logger.info(f"Added firewall rule on router: match={match}, action=[]")
+                # here, it is possible to send an ICMP "Network Unreachable Communication prohibited", instead of a hard drop
+                # but the exercise seems to require a hard drop
+                # for it to take effect: remove "False: #" from the next two if statements and comment out the add_flow above
+                if False: # firewall_entry not in self.firewall_tracked:
                     self.firewall_tracked.append(firewall_entry)
 
                     # There is an entry in the firewall-table fitting this packet
@@ -442,8 +448,8 @@ class LearningSwitch(app_manager.RyuApp):
 
                 # Send a "Destination Unreachable - Communication Administratively Prohibited" ICMP
                 # If it was an ICMP packet
-                if icmp_packet:
-                    outs.append(self.send_destination_unreachable(pkt, eth_packet, ipv4_packet, datapath, parser, in_port, ofproto))   
+                if False: # icmp_packet:
+                    outs.append(self.send_destination_unreachable(pkt, eth_packet, ipv4_packet, datapath, parser, in_port, ofproto))
 
             else:
                 logger.debug(f"self.ip_to_mac={self.ip_to_mac}")
