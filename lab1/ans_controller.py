@@ -53,6 +53,8 @@ class LearningSwitch(app_manager.RyuApp):
         
         # ARP cache for the router
         self.arp_cache = {} 
+        # buffer for packets that are waiting for arp replies 
+        self.pend_packets = {}
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -156,6 +158,36 @@ class LearningSwitch(app_manager.RyuApp):
         # Add IP to MAC mapping to cache
         self.arp_cache[arp_pkt.src_ip] = arp_pkt.src_mac
         
+        resolved_ip = arp_pkt.src_ip
+
+        # process and rease any bueffered packerts waiting for this ips mac
+        if resolved_ip in self.pend_packets:
+            for pending_dp, pending_in_port, pending_msg, pending_out_port in self.pend_packets[resolved_ip]:
+                router_mac_out = self.port_to_own_mac[pending_out_port]
+                dst_mac = arp_pkt.src_mac
+
+                match = parser.OFPMatch(eth_type=0x0800, ipv4_dst=resolved_ip)
+                actions = [
+                                parser.OFPActionSetField(eth_src=router_mac_out),
+                                parser.OFPActionSetField(eth_dst=dst_mac),
+                                parser.OFPActionDecNwTtl(),
+                                parser.OFPActionOutput(pending_out_port)
+                            ]
+                self.add_flow(pending_dp, 10, match, actions, pending_msg.buffer_id)
+
+                if pending_msg.buffer_id == ofproto.OFP_NO_BUFFER:
+                    out = parser.OFPPacketOut(
+                        datapath=pending_dp,
+                        buffer_id=pending_msg.buffer_id,
+                        in_port=pending_in_port,
+                        actions=actions,
+                        data=pending_msg.data
+                    )
+                    pending_dp.send_msg(out)
+            
+            # Clear the buffer for this IP once handled
+            del self.pend_packets[resolved_ip]
+
         if arp_pkt.opcode != arp.ARP_REQUEST:
             return
 
@@ -224,6 +256,9 @@ class LearningSwitch(app_manager.RyuApp):
         dst_mac = self.arp_cache.get(dst_ip)
 
         if not dst_mac:
+            if dst_ip not in self.pend_packets:
+                self.pend_packets[dst_ip] = []
+            self.pend_packets[dst_ip].append((datapath, in_port, msg, out_port))
             # Generate and send an ARP request for the unknown MAC
             router_ip_out = self.port_to_own_ip[out_port]
             router_mac_out = self.port_to_own_mac[out_port]
