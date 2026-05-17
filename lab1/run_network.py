@@ -96,11 +96,9 @@ class NetworkTopo(Topo):
 
         self.addLink(h2, s1, **link_config)
 
-        self.addLink(s1, s3, **link_config)
-
-        self.addLink(ext, s3, **link_config)
-
-        self.addLink(s3, s2, **link_config)
+        self.addLink(s1, s3, **link_config)   # -> Port 1
+        self.addLink(s3, s2, **link_config)   # -> Port 2
+        self.addLink(ext, s3, **link_config)  # -> Port 3
 
         self.addLink(s2, ser, **link_config)
 
